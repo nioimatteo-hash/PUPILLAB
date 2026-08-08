@@ -15,7 +15,9 @@ import os
 import csv
 import math
 import datetime
+import traceback
 from pathlib import Path
+from threading import Thread
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
@@ -303,15 +305,132 @@ class PupillabApp:
         self.tab_measure = ttk.Frame(self.nb)
         self.tab_stats = ttk.Frame(self.nb)
         self.tab_charts = ttk.Frame(self.nb)
+        self.tab_advanced = ttk.Frame(self.nb)
         self.tab_export = ttk.Frame(self.nb)
         self.nb.add(self.tab_measure, text=self.T["tab_measure"])
         self.nb.add(self.tab_stats, text=self.T["tab_stats"])
         self.nb.add(self.tab_charts, text=self.T["tab_charts"])
+        self.nb.add(self.tab_advanced, text="Analisi avanzata")
         self.nb.add(self.tab_export, text=self.T["tab_export"])
         self._build_measure_tab()
         self._build_stats_tab()
         self._build_charts_tab()
+        self._build_advanced_tab()
         self._build_export_tab()
+
+    # ---------- Analisi avanzata (modelli della revisione) ----------
+    def _build_advanced_tab(self):
+        frame = self.tab_advanced
+        self.advanced_input = tk.StringVar()
+        self.advanced_output = tk.StringVar()
+        self.advanced_running = False
+
+        box = ttk.LabelFrame(frame, text="Dataset e cartella dei risultati", padding=10)
+        box.pack(fill="x", padx=12, pady=12)
+        ttk.Label(box, text="File Excel (.xlsx/.xls)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(box, textvariable=self.advanced_input, width=75).grid(
+            row=1, column=0, sticky="ew", padx=(0, 8), pady=5
+        )
+        ttk.Button(box, text="Sfoglia…", command=self._pick_advanced_input).grid(row=1, column=1)
+        ttk.Label(box, text="Cartella output").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(box, textvariable=self.advanced_output, width=75).grid(
+            row=3, column=0, sticky="ew", padx=(0, 8), pady=5
+        )
+        ttk.Button(box, text="Sfoglia…", command=self._pick_advanced_output).grid(row=3, column=1)
+        box.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            frame,
+            text=(
+                "Esegue QC, descrittive, GEE, MixedLM con fallback OLS cluster-robust, "
+                "asimmetria interoculare, cause di morte, sostanze e interazioni, ROC "
+                "e regressione quantilica. Soglie: miosi ≤0,275; midriasi ≥0,460."
+            ),
+            wraplength=1050,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.advanced_run_btn = ttk.Button(
+            frame, text="Esegui analisi avanzata", command=self._run_advanced_analysis,
+            style="Accent.TButton"
+        )
+        self.advanced_run_btn.pack(anchor="w", padx=16, pady=5)
+        self.advanced_progress = ttk.Progressbar(frame, mode="indeterminate")
+        self.advanced_progress.pack(fill="x", padx=16, pady=5)
+        self.advanced_log = scrolledtext.ScrolledText(frame, wrap="word", height=20)
+        self.advanced_log.pack(fill="both", expand=True, padx=16, pady=(5, 12))
+        self._advanced_log_add("Pronto. Seleziona il dataset Excel e la cartella output.")
+
+    def _pick_advanced_input(self):
+        path = filedialog.askopenfilename(
+            title="Seleziona dataset PIR",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Tutti i file", "*.*")],
+        )
+        if path:
+            self.advanced_input.set(path)
+            if not self.advanced_output.get():
+                p = Path(path)
+                self.advanced_output.set(str(p.parent / f"{p.stem}_OUTPUT"))
+
+    def _pick_advanced_output(self):
+        path = filedialog.askdirectory(title="Seleziona cartella output")
+        if path:
+            self.advanced_output.set(path)
+
+    def _advanced_log_add(self, text):
+        def write():
+            self.advanced_log.insert("end", str(text) + ("" if str(text).endswith("\n") else "\n"))
+            self.advanced_log.see("end")
+        self.root.after(0, write)
+
+    def _run_advanced_analysis(self):
+        if self.advanced_running:
+            return
+        input_file = self.advanced_input.get().strip()
+        output_dir = self.advanced_output.get().strip()
+        if not input_file or not Path(input_file).is_file():
+            messagebox.showerror("Pupillab", "Seleziona un file Excel valido.")
+            return
+        if not output_dir:
+            messagebox.showerror("Pupillab", "Seleziona la cartella output.")
+            return
+
+        try:
+            from editorpalloso import PIRAnalysis
+        except Exception as exc:
+            messagebox.showerror(
+                "Pupillab",
+                "Impossibile caricare il motore di analisi. Verifica che "
+                "'editorpalloso.py' sia nella stessa cartella di PupilLab.py e installa "
+                "le dipendenze con: pip install -r requirements.txt"
+                f"\n\nDettaglio: {exc}",
+            )
+            return
+
+        self.advanced_running = True
+        self.advanced_run_btn.config(state="disabled")
+        self.advanced_progress.start(10)
+        self._advanced_log_add("Avvio analisi avanzata…")
+
+        def finish(ok, detail):
+            self.advanced_running = False
+            self.advanced_progress.stop()
+            self.advanced_run_btn.config(state="normal")
+            if ok:
+                messagebox.showinfo("Pupillab", f"Analisi completata.\nOutput: {detail}")
+            else:
+                messagebox.showerror("Pupillab", "Analisi non completata. Consulta il log.")
+
+        def worker():
+            try:
+                PIRAnalysis(input_file, output_dir, logger=self._advanced_log_add).run_all()
+                resolved = str(Path(output_dir).resolve())
+                self._advanced_log_add(f"Output salvato in: {resolved}")
+                self.root.after(0, lambda: finish(True, resolved))
+            except Exception:
+                self._advanced_log_add("ERRORE:\n" + traceback.format_exc())
+                self.root.after(0, lambda: finish(False, ""))
+
+        Thread(target=worker, daemon=True).start()
 
     # ---------- Tab Misura ----------
     def _build_measure_tab(self):
